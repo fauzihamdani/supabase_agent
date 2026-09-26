@@ -29,8 +29,12 @@ REFUSAL_TEXT = (
     "filter by status, filter by member, or filter by deadline date."
 )
 
-SYSTEM_PROMPT = """
-You are a data-retrieval agent for the 'projects' table in Supabase.
+GREETING_TEXT = (
+    "Hi! I'm your project data assistant. Ask me anything about your projects "
+    "— search, filter by status, member, or deadline."
+)
+
+SYSTEM_PROMPT = """You are a data-retrieval agent for the 'projects' table in Supabase.
 
 STRICT RULES:
 1. You may ONLY answer questions related to retrieving/searching/filtering project data.
@@ -48,7 +52,7 @@ STRICT RULES:
    searched for, e.g. "Here are the on-hold projects assigned to Fauzi Hamdani."
    Don't list individual project names/ids/details unless the user explicitly
    asks for only 1-3 specific items to be named.
-7. Reply in the same language the user used, briefly and clearly.
+7. IMPORTANT: You must respond in English ONLY, no matter what language the user writes in. This overrides everything else.
 """
 
 llm = ChatGroq(model=GROQ_MODEL, temperature=0)
@@ -62,27 +66,32 @@ class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
 
 
-def router_node(state: AgentState) -> Literal["agent", "refuse"]:
+def router_node(state: AgentState) -> Literal["agent", "greet", "refuse"]:
     last_user_msg = None
     for m in reversed(state["messages"]):
         if isinstance(m, HumanMessage):
             last_user_msg = m.content
             break
 
-    classification_prompt = f"""Classify the following user message into one of two labels:
+    classification_prompt = f"""Classify the following user message into one of three labels:
 - DATA_QUERY: if the message is related to requesting/searching/filtering/reporting project data
   (name, status, member, date/deadline, export, etc.), including follow-up questions
   that are still within the context of project data.
-- OTHER: if the message is not related at all to retrieving project data
-  (small talk, code requests, opinions, general topics, etc.).
+- GREETING: if the message is just a greeting or small talk opener (e.g. "hi", "halo", "how are you", "thanks").
+- OTHER: if the message is anything else not related to project data
+  (small talk beyond greeting, code requests, opinions, general topics, etc.).
 
-Reply with ONLY one word: DATA_QUERY or OTHER.
+Reply with ONLY one word: DATA_QUERY, GREETING, or OTHER.
 
 User message: \"\"\"{last_user_msg}\"\"\""""
 
     result = router_llm.invoke([HumanMessage(content=classification_prompt)])
     label = (result.content or "").strip().upper()
-    return "agent" if "DATA_QUERY" in label else "refuse"
+    if "DATA_QUERY" in label:
+        return "agent"
+    if "GREETING" in label:
+        return "greet"
+    return "refuse"
 
 
 def agent_node(state: AgentState):
@@ -93,6 +102,10 @@ def agent_node(state: AgentState):
 
 def refuse_node(state: AgentState):
     return {"messages": [AIMessage(content=REFUSAL_TEXT)]}
+
+
+def greet_node(state: AgentState):
+    return {"messages": [AIMessage(content=GREETING_TEXT)]}
 
 
 def should_continue(state: AgentState) -> Literal["tools", "end"]:
@@ -108,10 +121,11 @@ def build_graph():
     graph.add_node("agent", agent_node)
     graph.add_node("tools", ToolNode(TOOLS))
     graph.add_node("refuse", refuse_node)
+    graph.add_node("greet", greet_node)
 
     graph.set_conditional_entry_point(
         router_node,
-        {"agent": "agent", "refuse": "refuse"},
+        {"agent": "agent", "greet": "greet", "refuse": "refuse"},
     )
 
     graph.add_conditional_edges(
@@ -121,6 +135,7 @@ def build_graph():
     )
     graph.add_edge("tools", "agent")
     graph.add_edge("refuse", END)
+    graph.add_edge("greet", END)
 
     return graph.compile()
 
